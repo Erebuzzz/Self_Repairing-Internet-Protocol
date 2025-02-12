@@ -39,7 +39,7 @@ o Introduce redundancy mechanisms such as alternate paths and congestion
 aware load balancing. 
 o Implement a dynamic QoS-aware routing system that prioritizes critical traffic 
 under failure conditions. 
-5. Integration of BGP Hijack Detection: 
+5. Integration of BGP Hijack Detection:
 o Leverage RIPE RIS Live API to detect BGP hijack incidents and integrate 
 protective countermeasures. 
 o Implement anomaly detection algorithms to classify malicious routing 
