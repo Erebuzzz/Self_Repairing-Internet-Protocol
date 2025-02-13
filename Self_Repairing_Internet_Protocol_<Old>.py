@@ -56,7 +56,10 @@ def load_real_topology():
 
     return preprocess_topology(G) if G else None  # Ensure we return a valid graph
 
-processed_topologies = [load_real_topology()]
+processed_topologies = []
+topology = load_real_topology()
+if topology:
+    processed_topologies.append(topology)
 
 if processed_topologies[0] is None:
     raise ValueError("❌ Error: No valid topology loaded.")
@@ -81,8 +84,20 @@ async def bgp_hijack_monitor():
 
 threading.Thread(target=lambda: asyncio.run(bgp_hijack_monitor()), daemon=True).start()
 
-def detect_hijack(as_path):
-    return len(set(as_path)) < len(as_path) or (as_path and as_path[-1] not in legitimate_asns)
+def detect_hijack(as_path, prefix):
+    historic_routes = get_historical_routes(prefix)
+    
+    if as_path[-1] not in legitimate_asns or set(as_path) not in historic_routes:
+        print(f"🚨 Possible BGP Hijack detected for {prefix}")
+        return True
+    return False
+
+def get_historical_routes(prefix):
+    response = requests.get(f"https://stat.ripe.net/data/announced-prefixes/data.json?resource={prefix}")
+    if response.status_code == 200:
+        data = response.json()
+        return {item['asn'] for item in data.get("data", {}).get("prefixes", [])}
+    return set()
 
 def handle_hijack_event(prefix, hijacker_as):
     print(f"🚨 BGP Hijack detected: {prefix} hijacked by AS{hijacker_as}")
@@ -100,6 +115,17 @@ def intelligent_routing(G, source, target):
     available_paths = list(nx.all_simple_paths(G, source, target))
     if not available_paths:
         return None
+
+    # Use Q-learning to decide the best path
+    rewards = {}
+    for path in available_paths:
+        rewards[tuple(path)] = sum(G.edges[path[i], path[i+1], 0]['latency'] for i in range(len(path)-1))
+    
+    if random.random() < EPSILON:
+        return random.choice(available_paths)  # Explore
+
+    best_path = min(rewards, key=rewards.get)  # Exploit
+    return list(best_path)
     
     if random.random() < EPSILON:
         return random.choice(available_paths)
@@ -142,6 +168,19 @@ def monitor_network(G, interval=5):
 
     print("⏹ Monitoring stopped.")  # Notify when monitoring stops
 
+    def recover_from_failure(G, failed_node):
+        """Dynamically repair the network by rerouting traffic."""
+        print(f"⚠️ Node failure detected: {failed_node}. Finding alternative paths...")
+        for neighbor in list(G.neighbors(failed_node)):
+            alternative_paths = list(nx.all_simple_paths(G, source=neighbor, target=max(G.nodes())))
+            if alternative_paths:
+                best_path = min(alternative_paths, key=lambda path: sum(G.edges[path[i], path[i+1], 0]['latency'] for i in range(len(path)-1)))
+                print(f"🔄 Traffic rerouted via {best_path}")
+                return best_path
+        print("❌ No alternative path found. Network might be disrupted.")
+        return None
+    
+
 def start_bgp_hijack_monitor():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -173,16 +212,16 @@ def update_topology(G):
                 print(f"📉 BGP Route Withdrawal: Node {node} lost link to {withdrawn_neighbor}")
 
 def generate_cytoscape_graph(G):
-    if not isinstance(G, nx.Graph):
-        raise ValueError("❌ Error: Invalid graph object.")
-
-    elements = [{"data": {"id": str(node), "label": str(node)}} for node in G.nodes()]
-    
+    elements = [
+        {"data": {"id": str(node), "label": str(node)}, "classes": "failed-node" if G.degree(node) == 0 else ""}
+        for node in G.nodes()
+    ]
     elements += [
         {"data": {"source": str(u), "target": str(v), "weight": G.edges[u, v]["weight"]}}
         for u, v in G.edges()
     ]
     return elements
+
     print("🔍 Checking Edge List:")
     print(list(processed_topologies[0].edges(data=True))[:5])  # Print first 5 edges
 
