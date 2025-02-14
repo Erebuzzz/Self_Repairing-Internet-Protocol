@@ -12,6 +12,10 @@ import requests
 import asyncio
 import websockets
 import json
+import logging
+
+#Configure Logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # Global Variables
 monitoring_active = False
@@ -20,6 +24,7 @@ legitimate_asns = {12345, 67890}
 graph_lock = threading.Lock()
 monitor_task = None
 topology_task = None  # Track topology update thread
+hijacked_prefixes = set()
 
 # Load and preprocess network topology
 def load_real_topology():
@@ -51,23 +56,23 @@ async def bgp_hijack_monitor():
             async with websockets.connect(RIPE_RIS_URL) as ws:
                 subscription = {"type": "ris_subscribe", "data": {"type": "UPDATE", "moreSpecific": True}}
                 await ws.send(json.dumps(subscription))
-                print("🔍 Subscribed to RIPE RIS Live feed")
+                logging.info("🔍 Subscribed to RIPE RIS Live feed")
 
                 while monitoring_active:
                     try:
                         message = await asyncio.wait_for(ws.recv(), timeout=10)
                         data = json.loads(message)
-                        prefix = data["data"].get("prefix", None)
+                        prefix = data["data"].get("prefix", "")
                         as_path = data["data"].get("path", [])
 
                         if detect_hijack(as_path, prefix):
-                            print(f"🚨 BGP Hijack Alert! Prefix {prefix if prefix else '[Unknown]'} via AS Path {as_path}")
+                            logging.warning(f"🚨 BGP Hijack Alert! Prefix {prefix} via AS Path {as_path}")
 
                     except asyncio.TimeoutError:
-                        print("⚠️ No data received from RIPE RIS Live in 10 seconds.")
+                        logging.warning("⚠️ No data received from RIPE RIS Live in 10 seconds.")
 
         except websockets.exceptions.ConnectionClosedError:
-            print("🔴 WebSocket disconnected! Reconnecting in 5 seconds...")
+            logging.error("🔴 WebSocket disconnected! Reconnecting in 5 seconds...")
             await asyncio.sleep(5)
 
 def start_bgp_monitor():
@@ -75,7 +80,7 @@ def start_bgp_monitor():
     global monitoring_active
     if not monitoring_active:
         monitoring_active = True
-        print("✅ BGP Monitoring Started!")
+        logging.info("✅ BGP Monitoring Started!")
 
         # ✅ Ensure WebSocket runs in a new event loop
         threading.Thread(target=lambda: asyncio.run(bgp_hijack_monitor()), daemon=True).start()
@@ -152,19 +157,22 @@ def detect_hijack(as_path, prefix):
 
 # Generate Graph for Cytoscape
 def generate_cytoscape_graph(G):
-    elements = [{"data": {"id": str(node), "label": str(node)}} for node in G.nodes()]
+    hijacked_nodes = {str(node) for node in G.nodes() if random.random() < 0.2}  # Simulating hijack detection
     
-    valid_edges = []
-    for u, v, key, data in G.edges(keys=True, data=True):  # ✅ Get key and data properly
-        valid_edges.append({
+    elements = []
+    for node in G.nodes():
+        color = "red" if str(node) in hijacked_nodes else "blue"
+        elements.append({"data": {"id": str(node), "label": str(node)}, "classes": color})
+
+    for u, v, key, data in G.edges(keys=True, data=True):
+        elements.append({
             "data": {
                 "source": str(u),
                 "target": str(v),
                 "weight": data.get("weight", 1)
             }
         })
-    
-    elements.extend(valid_edges)
+
     return elements
 
 # Dash App Setup
@@ -178,7 +186,11 @@ app.layout = html.Div([
         id='cytoscape-network',
         elements=generate_cytoscape_graph(G),
         layout={'name': 'cose'},
-        style={'width': '100%', 'height': '600px'}
+        style={'width': '100%', 'height': '600px'},
+        stylesheet=[
+            {'selector': '.red', 'style': {'background-color': 'red', 'label': 'data(label)'}},
+            {'selector': '.blue', 'style': {'background-color': 'blue', 'label': 'data(label)'}},
+        ]
     ),
     dcc.Interval(id='interval-component', interval=5000, n_intervals=0)
 ])
@@ -207,12 +219,12 @@ def update_network(start_clicks, stop_clicks, n_intervals):
                 topology_task = threading.Thread(target=update_topology, daemon=True)
                 topology_task.start()
             start_bgp_monitor()
-            print("✅ Monitoring started!")
+            logging.info("✅ Monitoring started!")
 
     elif trigger_id == "stop-button":
         monitoring_active = False
         stop_bgp_monitor()
-        print("⏹ Monitoring stopped.")
+        logging.info("⏹ Monitoring stopped.")
 
     return generate_cytoscape_graph(G), monitoring_active, not monitoring_active
 
