@@ -3,8 +3,8 @@ import time
 import networkx as nx
 import random
 import dash
-import dash_core_components as dcc
-import dash_html_components as html
+from dash import dcc
+from dash import html
 import dash_cytoscape as cyto
 from dash.dependencies import Input, Output
 from collections import defaultdict
@@ -13,8 +13,10 @@ import asyncio
 import websockets
 import json
 import logging
+import gzip
+import shutil
 
-#Configure Logging
+# Configure Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # Global Variables
@@ -27,23 +29,52 @@ topology_task = None  # Track topology update thread
 hijacked_prefixes = set()
 
 # Load and preprocess network topology
+import networkx as nx
+import requests
+
 def load_real_topology():
-    url = "https://topology-zoo.org/files/TataNld.graphml"
+    """Downloads and loads the AS-733 topology from Network Repository."""
+    url = "https://networkrepository.com/data/as-733.graphml"
+    filename = "as-733_19981231.graphml"
+
+    # Download the GraphML file if it doesn't exist
     response = requests.get(url)
     if response.status_code == 200:
-        with open("TataNld.graphml", "wb") as file:
+        with open(filename, "wb") as file:
             file.write(response.content)
-        G = nx.read_graphml("TataNld.graphml")
-        return preprocess_topology(G)
-    return None
+        print("✅ AS-733 GraphML file downloaded successfully!")
 
-def preprocess_topology(G):
+    # Load the graph
+    G = nx.read_graphml(filename)
+    print(f"✅ Loaded AS-733 Graph: {len(G.nodes())} nodes, {len(G.edges())} edges")
+
+    return preprocess_topology(G)
+
+"""def preprocess_topology(G):
     G = nx.convert_node_labels_to_integers(nx.MultiGraph(G))
     for u, v, k in G.edges(keys=True):
         G.edges[u, v, k].setdefault("weight", random.randint(1, 10))
         G.edges[u, v, k].setdefault("latency", random.uniform(1, 50))
         G.edges[u, v, k].setdefault("bandwidth", random.randint(1, 100))
     G.remove_nodes_from(list(nx.isolates(G)))
+    return G"""
+
+def preprocess_topology(G):
+    """Process AS-733 topology by setting default edge attributes."""
+    print(f"Before processing: {len(G.nodes())} nodes, {len(G.edges())} edges")
+
+    G = nx.convert_node_labels_to_integers(G)  # Convert labels to integers
+    
+    for u, v, data in G.edges(data=True):  
+        data.setdefault("weight", random.randint(1, 10))
+        data.setdefault("latency", random.uniform(1, 50))
+        data.setdefault("bandwidth", random.randint(1, 100))
+
+    isolated_nodes = list(nx.isolates(G))
+    print(f"Removing {len(isolated_nodes)} isolated nodes")
+    G.remove_nodes_from(isolated_nodes)
+
+    print(f"After processing: {len(G.nodes())} nodes, {len(G.edges())} edges")
     return G
 
 G = load_real_topology() or nx.erdos_renyi_graph(10, 0.5)
@@ -157,23 +188,27 @@ def detect_hijack(as_path, prefix):
 
 # Generate Graph for Cytoscape
 def generate_cytoscape_graph(G):
-    hijacked_nodes = {str(node) for node in G.nodes() if random.random() < 0.2}  # Simulating hijack detection
-    
-    elements = []
+    """Generates elements for Dash Cytoscape visualization"""
+    elements = []  # ✅ Ensure elements is defined at the start
+
+    hijacked_nodes = {str(node) for node in G.nodes() if random.random() < 0.2}  # Simulated hijack detection
+
+    # Add nodes with color classification
     for node in G.nodes():
         color = "red" if str(node) in hijacked_nodes else "blue"
         elements.append({"data": {"id": str(node), "label": str(node)}, "classes": color})
 
-    for u, v, key, data in G.edges(keys=True, data=True):
+    # Add edges with weights
+    for u, v, data in G.edges(data=True):  # ✅ No `keys=True`
         elements.append({
             "data": {
                 "source": str(u),
                 "target": str(v),
-                "weight": data.get("weight", 1)
+                "weight": data.get("weight", 1)  # Default weight if missing
             }
         })
 
-    return elements
+    return elements  # ✅ Ensure elements is returned
 
 # Dash App Setup
 app = dash.Dash(__name__)
@@ -185,13 +220,55 @@ app.layout = html.Div([
     cyto.Cytoscape(
         id='cytoscape-network',
         elements=generate_cytoscape_graph(G),
-        layout={'name': 'cose'},
-        style={'width': '100%', 'height': '600px'},
+        layout={'name': 'cose', 'idealEdgeLength': 120, 'nodeRepulsion': 3000},  # Better spacing
+        style={'width': '100%', 'height': '700px', 'background-color': '#000000'},  # Dark theme background
+        zoomingEnabled=True,
+        userZoomingEnabled=True,
+        panningEnabled=True,
+        userPanningEnabled=True,
+        wheelSensitivity=0.5,
         stylesheet=[
-            {'selector': '.red', 'style': {'background-color': 'red', 'label': 'data(label)'}},
-            {'selector': '.blue', 'style': {'background-color': 'blue', 'label': 'data(label)'}},
+            # 🔹 Default Nodes - Gradient Color Based on Degree
+            {'selector': 'node', 'style': {
+                'width': '12px', 'height': '12px',
+                'background-color': 'mapData(degree, 0, 10, #1f78b4, #ff7f00)',  # Blue to Orange Gradient
+                'label': 'data(label)',
+                'color': '#ffffff', 'font-size': '8px', 'text-outline-width': '1px', 'text-outline-color': '#333333'
+            }},
+        
+            # 🔴 High-Degree Nodes (Hub Nodes)
+            {'selector': '[degree >= 8]', 'style': {
+                'width': '15px', 'height': '15px',
+                'background-color': '#ff0000',  # Red for high-degree nodes
+                'border-width': '2px', 'border-color': '#ffff00',  # Yellow border
+                'shadow': '5px 5px 5px rgba(255,255,0,0.7)'  # Glow effect
+            }},
+
+            # 🔷 Hijacked Nodes (Simulated Warning)
+            {'selector': '.red', 'style': {
+                'background-color': 'red',
+                'width': '14px', 'height': '14px',
+                'border-width': '2px', 'border-color': 'yellow',  # Glow for hijacked nodes
+                'shadow': '5px 5px 5px rgba(255,255,0,0.7)'
+            }},
+
+            # 🔹 Standard Edges - Smooth & Colorful
+            {'selector': 'edge', 'style': {
+                'width': 'mapData(weight, 1, 10, 1px, 4px)',  # Adjust thickness based on weight
+                'line-color': 'mapData(weight, 1, 10, #00ff00, #ff4500)',  # Green to Orange Gradient
+                'curve-style': 'bezier',  # Smooth edges
+                'target-arrow-shape': 'triangle',
+                'target-arrow-color': '#ffffff'
+            }},
+
+            # 🔥 Important Edges - Stronger Visibility
+            {'selector': '[weight >= 8]', 'style': {
+                'line-color': '#ff0000',  # Red for high-weight edges
+                'width': '5px'
+            }}
         ]
     ),
+
     dcc.Interval(id='interval-component', interval=5000, n_intervals=0)
 ])
 
@@ -229,4 +306,4 @@ def update_network(start_clicks, stop_clicks, n_intervals):
     return generate_cytoscape_graph(G), monitoring_active, not monitoring_active
 
 if __name__ == "__main__":
-    app.run_server(debug=True, use_reloader=False, port=8051)
+    app.run_server(debug=True, use_reloader=False, port=8052)
