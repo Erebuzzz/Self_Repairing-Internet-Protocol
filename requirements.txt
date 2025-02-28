@@ -1,0 +1,9 @@
+networkx
+dash
+dash-core-components
+dash-html-components
+dash-cytoscape
+requests
+asyncio
+websockets
+logging
